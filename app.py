@@ -60,6 +60,20 @@ st.markdown("""
         border-left: 4px solid #C9A84C;
         box-shadow: 0 1px 4px rgba(0,0,0,0.08);
     }
+    /* Refresh Data button — gold border, white text, always visible */
+    [data-testid="stSidebar"] .stButton > button {
+        background-color: transparent !important;
+        color: #FFFFFF !important;
+        border: 2px solid #C9A84C !important;
+        border-radius: 8px !important;
+        width: 100%;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+    }
+    [data-testid="stSidebar"] .stButton > button:hover {
+        background-color: #C9A84C !important;
+        color: #0D1B2A !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
