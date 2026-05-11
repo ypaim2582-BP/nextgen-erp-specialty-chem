@@ -52,6 +52,11 @@ def query(sql, params=None):
         st.error(f"Database error: {e}")
         return pd.DataFrame()
 
+def scalar(sql, params=None, default=0):
+    """Return the first cell of a single-row query, or default if DB is unreachable."""
+    df = query(sql, params=params)
+    return df.iloc[0, 0] if not df.empty else default
+
 # ── Sidebar navigation ─────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🏭 NextERA ERP")
@@ -80,15 +85,15 @@ if page == "🏠 Dashboard":
     # KPI cards
     col1, col2, col3, col4, col5 = st.columns(5)
 
-    total_items = query("SELECT COUNT(*) as n FROM items").iloc[0,0]
-    critical_stock = query("""
+    total_items    = scalar("SELECT COUNT(*) as n FROM items")
+    critical_stock = scalar("""
         SELECT COUNT(*) as n FROM inventory inv
         JOIN items i ON inv.item_id=i.id
         WHERE inv.quantity < i.min_stock
-    """).iloc[0,0]
-    open_incidents = query("SELECT COUNT(*) as n FROM hse_incidents WHERE status='OPEN'").iloc[0,0]
-    active_permits = query("SELECT COUNT(*) as n FROM permits WHERE status='ACTIVE'").iloc[0,0]
-    pending_permits = query("SELECT COUNT(*) as n FROM permits WHERE status='PENDING'").iloc[0,0]
+    """)
+    open_incidents = scalar("SELECT COUNT(*) as n FROM hse_incidents WHERE status='OPEN'")
+    active_permits = scalar("SELECT COUNT(*) as n FROM permits WHERE status='ACTIVE'")
+    pending_permits= scalar("SELECT COUNT(*) as n FROM permits WHERE status='PENDING'")
 
     col1.metric("📦 Total Materials", int(total_items))
     col2.metric("🔴 Critical Stock", int(critical_stock), delta=f"-{int(critical_stock)} alerts", delta_color="inverse")
@@ -198,10 +203,10 @@ elif page == "📦 Inventory":
 
     df_inv = query(base_sql)
 
-    total_val = query("""
+    total_val = scalar("""
         SELECT ROUND(SUM(inv.quantity * i.unit_price),2) AS val
         FROM inventory inv JOIN items i ON inv.item_id=i.id
-    """).iloc[0,0] or 0
+    """, default=0) or 0
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Materials in Stock", len(df_inv))
@@ -239,10 +244,10 @@ elif page == "🔴 HSE":
 
     # KPIs
     c1, c2, c3, c4 = st.columns(4)
-    total_inc = query("SELECT COUNT(*) as n FROM hse_incidents").iloc[0,0]
-    open_inc  = query("SELECT COUNT(*) as n FROM hse_incidents WHERE status='OPEN'").iloc[0,0]
-    high_inc  = query("SELECT COUNT(*) as n FROM hse_incidents WHERE severity IN ('ALTO','MUITO ALTO')").iloc[0,0]
-    closed_inc= query("SELECT COUNT(*) as n FROM hse_incidents WHERE status='CLOSED'").iloc[0,0]
+    total_inc  = scalar("SELECT COUNT(*) as n FROM hse_incidents")
+    open_inc   = scalar("SELECT COUNT(*) as n FROM hse_incidents WHERE status='OPEN'")
+    high_inc   = scalar("SELECT COUNT(*) as n FROM hse_incidents WHERE severity IN ('ALTO','MUITO ALTO')")
+    closed_inc = scalar("SELECT COUNT(*) as n FROM hse_incidents WHERE status='CLOSED'")
     c1.metric("Total Incidents", int(total_inc))
     c2.metric("Open", int(open_inc), delta="Action needed" if open_inc>0 else None, delta_color="inverse")
     c3.metric("High Severity", int(high_inc))
@@ -294,10 +299,10 @@ elif page == "🔑 Control of Work":
     st.markdown("---")
 
     c1, c2, c3, c4 = st.columns(4)
-    total_p   = query("SELECT COUNT(*) as n FROM permits").iloc[0,0]
-    active_p  = query("SELECT COUNT(*) as n FROM permits WHERE status='ACTIVE'").iloc[0,0]
-    pending_p = query("SELECT COUNT(*) as n FROM permits WHERE status='PENDING'").iloc[0,0]
-    loto_p    = query("SELECT COUNT(*) as n FROM permits WHERE isolation_required=true AND status!='CLOSED'").iloc[0,0]
+    total_p   = scalar("SELECT COUNT(*) as n FROM permits")
+    active_p  = scalar("SELECT COUNT(*) as n FROM permits WHERE status='ACTIVE'")
+    pending_p = scalar("SELECT COUNT(*) as n FROM permits WHERE status='PENDING'")
+    loto_p    = scalar("SELECT COUNT(*) as n FROM permits WHERE isolation_required=true AND status!='CLOSED'")
     c1.metric("Total Permits", int(total_p))
     c2.metric("🟢 Active", int(active_p))
     c3.metric("⏳ Pending Approval", int(pending_p), delta="Waiting" if pending_p>0 else None, delta_color="inverse")
