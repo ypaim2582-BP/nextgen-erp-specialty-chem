@@ -112,6 +112,22 @@ def scalar(sql, params=None, default=0):
     df = query(sql, params=params)
     return df.iloc[0, 0] if not df.empty else default
 
+def execute(sql, params=None):
+    """Execute a write query (INSERT / UPDATE / DELETE). Returns True on success."""
+    try:
+        conn = get_conn()
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+        conn.commit()
+        return True
+    except Exception as e:
+        st.error(f"❌ Database error: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+
 # ── Sidebar navigation ─────────────────────────────────────────────────────────
 with st.sidebar:
     logo_html = get_logo_html()
@@ -274,6 +290,51 @@ elif page == "📦 Inventory":
     st.markdown("---")
     st.dataframe(df_inv, use_container_width=True, hide_index=True, height=400)
 
+    # ── Stock Movement Form ─────────────────────────────────────
+    st.markdown("---")
+    with st.expander("➕ Record Stock Movement (Receive / Issue)", expanded=False):
+        items_df = query("SELECT id, code, name, uom FROM items ORDER BY code")
+        wh_df2   = query("SELECT id, name FROM warehouses ORDER BY name")
+        if not items_df.empty and not wh_df2.empty:
+            item_labels = [f"{r['code']} — {r['name']} ({r['uom']})" for _, r in items_df.iterrows()]
+            item_ids    = items_df["id"].tolist()
+            wh_labels   = wh_df2["name"].tolist()
+            wh_ids      = wh_df2["id"].tolist()
+
+            with st.form("form_stock_movement", clear_on_submit=True):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    sel_item  = st.selectbox("Material *", item_labels)
+                    sel_item_id = item_ids[item_labels.index(sel_item)]
+                with c2:
+                    sel_wh   = st.selectbox("Warehouse *", wh_labels)
+                    sel_wh_id = wh_ids[wh_labels.index(sel_wh)]
+                with c3:
+                    mv_type  = st.selectbox("Movement Type", ["IN — Goods Receipt", "OUT — Issue / Consumption", "ADJ — Adjustment"])
+                qty      = st.number_input("Quantity *", min_value=0.01, step=0.5, format="%.2f")
+                ref      = st.text_input("Reference (PO number, batch, reason)", placeholder="e.g. PO-2026-001 or Manual adjustment")
+                mv_submit= st.form_submit_button("📦 Record Movement", use_container_width=True)
+
+            if mv_submit:
+                mv_code = mv_type.split(" — ")[0]  # "IN", "OUT", or "ADJ"
+                actual_qty = qty if mv_code == "IN" else -qty
+                # Insert stock movement
+                ok1 = execute("""
+                    INSERT INTO stock_movements (item_id, warehouse_id, movement_type, quantity, reference, movement_date)
+                    VALUES (%s, %s, %s, %s, %s, NOW())
+                """, (sel_item_id, sel_wh_id, mv_code, qty, ref.strip() or None))
+                # Update inventory balance
+                ok2 = execute("""
+                    UPDATE inventory SET quantity = quantity + %s
+                    WHERE item_id=%s AND warehouse_id=%s
+                """, (actual_qty, sel_item_id, sel_wh_id)) if ok1 else False
+                if ok1 and ok2:
+                    st.success(f"✅ Movement recorded — {mv_code} {qty:.2f} units. Inventory updated.")
+                    st.cache_resource.clear()
+                    st.rerun()
+                elif ok1:
+                    st.warning("Movement logged but inventory record not found. Check item/warehouse combination.")
+
     # DG Compliance section
     st.markdown("---")
     st.subheader("🧪 Dangerous Goods Compliance Check")
@@ -312,7 +373,7 @@ elif page == "🔴 HSE":
     c4.metric("Closed", int(closed_inc))
 
     st.markdown("---")
-    tab1, tab2 = st.tabs(["📋 Incident Register", "⚠️ Risk Assessments"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📋 Incident Register", "⚠️ Risk Assessments", "➕ Log New Incident", "✏️ Update Incident"])
 
     with tab1:
         status_filter = st.selectbox("Filter by status", ["All", "OPEN", "CLOSED", "INVESTIGATING"])
@@ -347,6 +408,76 @@ elif page == "🔴 HSE":
         """)
         st.dataframe(df_risk, use_container_width=True, hide_index=True)
         st.info("📋 Risk Score = Probability × Severity | Critical ≥15 | High ≥10 | Medium ≥6")
+
+    with tab3:
+        st.subheader("Log a New HSE Incident")
+        wh_df = query("SELECT id, name FROM warehouses ORDER BY name")
+        wh_options = ["(No specific location)"] + wh_df["name"].tolist() if not wh_df.empty else ["(No specific location)"]
+        wh_id_map  = dict(zip(wh_df["name"].tolist(), wh_df["id"].tolist())) if not wh_df.empty else {}
+
+        with st.form("form_new_incident", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                inc_date  = st.date_input("Incident Date", value=datetime.today().date())
+                inc_type  = st.selectbox("Incident Type", [
+                    "Near Miss", "First Aid", "Medical Treatment",
+                    "Lost Time Injury", "Environmental Spill",
+                    "Property Damage", "Fire", "Chemical Exposure", "Other"
+                ])
+                severity  = st.selectbox("Severity", ["BAIXO", "MÉDIO", "ALTO", "MUITO ALTO"])
+            with c2:
+                reporter  = st.text_input("Reported by *", placeholder="Full name")
+                location  = st.selectbox("Location / Warehouse", wh_options)
+                inc_status= st.selectbox("Initial Status", ["OPEN", "INVESTIGATING"])
+            description  = st.text_area("Description of what happened *", height=110, placeholder="Describe the incident clearly...")
+            corrective   = st.text_area("Immediate corrective action taken (if any)", height=80, placeholder="Leave blank if none yet.")
+            submitted = st.form_submit_button("📝 Submit Incident Report", use_container_width=True)
+
+        if submitted:
+            if not reporter.strip() or not description.strip():
+                st.error("Reporter name and description are required.")
+            else:
+                wh_id = wh_id_map.get(location)
+                ok = execute("""
+                    INSERT INTO hse_incidents
+                        (incident_date, incident_type, severity, reporter,
+                         warehouse_id, description, corrective_action, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """, (inc_date, inc_type, severity, reporter.strip(),
+                      wh_id, description.strip(), corrective.strip() or None, inc_status))
+                if ok:
+                    st.success(f"✅ Incident logged successfully! Dashboard counters will update on next refresh.")
+                    st.cache_resource.clear()
+                    st.rerun()
+
+    with tab4:
+        st.subheader("Update an Existing Incident")
+        incidents_df = query("SELECT id, incident_date::text, incident_type, severity, status FROM hse_incidents ORDER BY id DESC")
+        if incidents_df.empty:
+            st.info("No incidents found.")
+        else:
+            inc_labels = [f"ID {r['id']} — {r['incident_date']} | {r['incident_type']} | {r['severity']} | {r['status']}"
+                          for _, r in incidents_df.iterrows()]
+            inc_ids    = incidents_df["id"].tolist()
+            selected   = st.selectbox("Select incident to update", inc_labels)
+            sel_id     = inc_ids[inc_labels.index(selected)]
+
+            with st.form("form_update_incident"):
+                new_status     = st.selectbox("New Status", ["OPEN", "INVESTIGATING", "CLOSED"])
+                corrective_upd = st.text_area("Corrective Action / Investigation Notes", height=100,
+                                              placeholder="Describe actions taken, root cause, outcome...")
+                upd_submitted = st.form_submit_button("💾 Save Update", use_container_width=True)
+
+            if upd_submitted:
+                ok = execute("""
+                    UPDATE hse_incidents
+                    SET status=%s, corrective_action=%s
+                    WHERE id=%s
+                """, (new_status, corrective_upd.strip() or None, sel_id))
+                if ok:
+                    st.success(f"✅ Incident #{sel_id} updated to {new_status}.")
+                    st.cache_resource.clear()
+                    st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE: CONTROL OF WORK
@@ -391,6 +522,82 @@ elif page == "🔑 Control of Work":
         st.error(f"🔒 {int(loto_p)} active/pending permit(s) require energy isolation (LOTO). Verify before authorising.")
 
     st.markdown("---")
+
+    col_form1, col_form2 = st.columns(2)
+
+    # ── NEW PERMIT FORM ─────────────────────────────────────────
+    with col_form1:
+        with st.expander("➕ Request New Work Permit", expanded=False):
+            with st.form("form_new_permit", clear_on_submit=True):
+                permit_type = st.selectbox("Type of Work", [
+                    "Hot Work", "Cold Work", "Confined Space Entry",
+                    "Electrical Work", "Working at Height",
+                    "Chemical Handling", "Excavation", "General Maintenance"
+                ])
+                area       = st.text_input("Work Area / Location *", placeholder="e.g. Tank Farm A, Reactor Zone 3")
+                requestor  = st.text_input("Requested by *", placeholder="Full name + role")
+                risk_level = st.selectbox("Risk Level", ["BAIXO", "MÉDIO", "ALTO", "MUITO ALTO"])
+                start_date = st.date_input("Planned Start Date", value=datetime.today().date())
+                isolation  = st.checkbox("🔒 Energy Isolation (LOTO) required?")
+                description= st.text_area("Work Description *", height=90, placeholder="Describe the work to be performed...")
+                notes      = st.text_area("Additional Safety Notes", height=70, placeholder="PPE, precautions, hazards to control...")
+                p_submit   = st.form_submit_button("📋 Submit Permit Request", use_container_width=True)
+
+            if p_submit:
+                if not area.strip() or not requestor.strip() or not description.strip():
+                    st.error("Area, requestor, and description are required.")
+                else:
+                    # Auto-generate permit number: PTW-YYYYMMDD-XXX
+                    last_id = scalar("SELECT COALESCE(MAX(id),0) FROM permits") or 0
+                    permit_no = f"PTW-{datetime.today().strftime('%Y%m%d')}-{int(last_id)+1:03d}"
+                    ok = execute("""
+                        INSERT INTO permits
+                            (permit_number, permit_type, area, requestor, status,
+                             risk_level, start_date, isolation_required, description, notes)
+                        VALUES (%s, %s, %s, %s, 'PENDING', %s, %s, %s, %s, %s)
+                    """, (permit_no, permit_type, area.strip(), requestor.strip(),
+                          risk_level, start_date, isolation, description.strip(), notes.strip() or None))
+                    if ok:
+                        st.success(f"✅ Permit **{permit_no}** submitted — status: PENDING APPROVAL.")
+                        st.cache_resource.clear()
+                        st.rerun()
+
+    # ── APPROVE / CLOSE PERMIT ───────────────────────────────────
+    with col_form2:
+        with st.expander("✅ Approve / Close a Permit", expanded=False):
+            pending_df = query("SELECT id, permit_number, permit_type, area, status FROM permits WHERE status IN ('PENDING','ACTIVE') ORDER BY id DESC")
+            if pending_df.empty:
+                st.info("No pending or active permits to action.")
+            else:
+                p_labels = [f"{r['permit_number']} — {r['permit_type']} | {r['area']} | {r['status']}"
+                            for _, r in pending_df.iterrows()]
+                p_ids    = pending_df["id"].tolist()
+                sel_p    = st.selectbox("Select permit", p_labels)
+                sel_pid  = p_ids[p_labels.index(sel_p)]
+
+                with st.form("form_approve_permit"):
+                    action   = st.selectbox("Action", ["ACTIVE (Approve)", "CLOSED (Close / Cancel)"])
+                    approver = st.text_input("Authorised by *", placeholder="Name + role")
+                    p_notes  = st.text_area("Approval / Closure notes", height=80)
+                    a_submit = st.form_submit_button("💾 Confirm Action", use_container_width=True)
+
+                if a_submit:
+                    if not approver.strip():
+                        st.error("Authoriser name is required.")
+                    else:
+                        new_status = "ACTIVE" if "ACTIVE" in action else "CLOSED"
+                        ok = execute("""
+                            UPDATE permits
+                            SET status=%s, approver=%s,
+                                notes=COALESCE(NULLIF(%s,''), notes)
+                            WHERE id=%s
+                        """, (new_status, approver.strip(), p_notes.strip(), sel_pid))
+                        if ok:
+                            st.success(f"✅ Permit updated to **{new_status}**.")
+                            st.cache_resource.clear()
+                            st.rerun()
+
+    st.markdown("---")
     st.info("💡 **ELEVNOVA Advantage:** This permit register is live-linked to your inventory and HSE modules. Any incident during an active permit is automatically associated. Conflict detection between overlapping permits — coming in next version.")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -428,6 +635,59 @@ elif page == "🚚 Procurement":
         st.dataframe(df_po, use_container_width=True, hide_index=True)
         st.warning("⚠️ Urgent: 5,000 KG Hidróxido de Sódio on order — critical stockout. Expected 16/05/2026.")
 
+        st.markdown("---")
+        with st.expander("➕ Create New Purchase Order", expanded=False):
+            sup_df   = query("SELECT id, name, payment_terms FROM suppliers ORDER BY name")
+            items_po = query("SELECT id, code, name, uom, unit_price FROM items ORDER BY code")
+            if not sup_df.empty and not items_po.empty:
+                sup_labels  = sup_df["name"].tolist()
+                sup_ids     = sup_df["id"].tolist()
+                item_labels = [f"{r['code']} — {r['name']} ({r['uom']})" for _, r in items_po.iterrows()]
+                item_ids    = items_po["id"].tolist()
+                unit_prices = items_po["unit_price"].tolist()
+
+                with st.form("form_new_po", clear_on_submit=True):
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        sel_sup   = st.selectbox("Supplier *", sup_labels)
+                        sel_sup_id= sup_ids[sup_labels.index(sel_sup)]
+                        order_date= st.date_input("Order Date", value=datetime.today().date())
+                    with c2:
+                        sel_item   = st.selectbox("Material *", item_labels)
+                        sel_item_id= item_ids[item_labels.index(sel_item)]
+                        sel_price  = unit_prices[item_ids.index(sel_item_id)]
+                        exp_date   = st.date_input("Expected Delivery Date")
+                    qty_po   = st.number_input("Quantity *", min_value=1.0, step=1.0, format="%.1f")
+                    unit_price_override = st.number_input("Unit Price (€)", min_value=0.0,
+                                                           value=float(sel_price) if sel_price else 0.0,
+                                                           step=0.01, format="%.2f")
+                    po_notes = st.text_area("Notes / Special Instructions", height=70)
+                    po_status= st.selectbox("Status", ["DRAFT", "CONFIRMED"])
+                    po_submit= st.form_submit_button("🚚 Create Purchase Order", use_container_width=True)
+
+                if po_submit:
+                    total_val = round(qty_po * unit_price_override, 2)
+                    # Generate PO number
+                    last_po = scalar("SELECT COALESCE(MAX(id),0) FROM purchase_orders") or 0
+                    po_num  = f"PO-{datetime.today().strftime('%Y')}-{int(last_po)+1:04d}"
+                    ok1 = execute("""
+                        INSERT INTO purchase_orders
+                            (supplier_id, status, order_date, expected_date, total_value, notes)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                    """, (sel_sup_id, po_status, order_date, exp_date, total_val, po_notes.strip() or None))
+                    if ok1:
+                        # Get the new PO id
+                        new_po_id = scalar("SELECT MAX(id) FROM purchase_orders")
+                        ok2 = execute("""
+                            INSERT INTO po_lines (po_id, item_id, quantity, unit_price, received_qty)
+                            VALUES (%s, %s, %s, %s, 0)
+                        """, (int(new_po_id), sel_item_id, qty_po, unit_price_override))
+                        if ok2:
+                            st.success(f"✅ Purchase Order **{po_num}** created — Total: €{total_val:,.2f} | Status: {po_status}")
+                            st.cache_resource.clear()
+                            st.rerun()
+
     with tab2:
         df_sup = query("""
             SELECT s.name AS "Fornecedor", s.country AS "País",
@@ -444,4 +704,4 @@ elif page == "🚚 Procurement":
 # ─────────────────────────────────────────────────────────────────────────────
 # Footer
 st.markdown("---")
-st.caption("⚡ ELEVNOVA ERP v0.1 — Elevate to the Next Standard | © 2026 Bravery & Perfection Lda | Powered by AWS RDS eu-north-1")
+st.caption("⚡ ELEVNOVA ERP v0.2 — Elevate to the Next Standard | © 2026 Bravery & Perfection Lda | Powered by AWS RDS eu-north-1")
