@@ -33,7 +33,7 @@ st.markdown("""
 
 # ── Database connection ────────────────────────────────────────────────────────
 DB = {
-    "host":     "nextgen-erp-db.c9akciq32.eu-north-1.rds.amazonaws.com",
+    "host":     "nextgen-erp-db.c3qi4eq26ej7.eu-north-1.rds.amazonaws.com",
     "port":     5432,
     "user":     "postgres",
     "password": "NextGen2026!SafeDB#Specialty",   # ⚠️ Change after testing
