@@ -163,7 +163,7 @@ def get_ai():
     if not key:
         return None
     _genai.configure(api_key=key)
-    return _genai.GenerativeModel("gemini-1.5-flash")
+    return _genai.GenerativeModel("gemini-2.0-flash")
 
 def ai_call(system, user_msg, max_tokens=600):
     """Generic Gemini call — returns text or None."""
