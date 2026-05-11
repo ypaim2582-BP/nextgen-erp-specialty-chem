@@ -11,10 +11,10 @@ import base64
 import os
 from datetime import datetime
 try:
-    import anthropic as _anthropic
-    ANTHROPIC_AVAILABLE = True
+    import google.generativeai as _genai
+    GENAI_AVAILABLE = True
 except ImportError:
-    ANTHROPIC_AVAILABLE = False
+    GENAI_AVAILABLE = False
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -151,30 +151,32 @@ Tables:
 
 @st.cache_resource
 def get_ai():
-    if not ANTHROPIC_AVAILABLE:
+    if not GENAI_AVAILABLE:
         return None
     key = ""
     try:
-        key = st.secrets.get("ANTHROPIC_API_KEY", "")
+        key = st.secrets.get("GEMINI_API_KEY", "")
     except Exception:
         pass
     if not key:
-        key = os.environ.get("ANTHROPIC_API_KEY", "")
-    return _anthropic.Anthropic(api_key=key) if key else None
+        key = os.environ.get("GEMINI_API_KEY", "")
+    if not key:
+        return None
+    _genai.configure(api_key=key)
+    return _genai.GenerativeModel("gemini-1.5-flash")
 
 def ai_call(system, user_msg, max_tokens=600):
-    """Generic Claude call — returns text or None."""
-    ai = get_ai()
-    if not ai:
+    """Generic Gemini call — returns text or None."""
+    model = get_ai()
+    if not model:
         return None
     try:
-        msg = ai.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user_msg}]
+        prompt = f"{system}\n\n{user_msg}"
+        response = model.generate_content(
+            prompt,
+            generation_config=_genai.GenerationConfig(max_output_tokens=max_tokens)
         )
-        return msg.content[0].text.strip()
+        return response.text.strip()
     except Exception as e:
         st.error(f"AI error: {e}")
         return None
@@ -848,17 +850,16 @@ elif page == "🤖 AI Assistant":
     st.markdown("---")
 
     if get_ai() is None:
-        st.error("⚠️ AI not configured. Add `ANTHROPIC_API_KEY` to your Streamlit secrets (see setup instructions below).")
+        st.error("⚠️ AI not configured. Add `GEMINI_API_KEY` to your Streamlit secrets (see setup instructions below).")
         with st.expander("📋 How to add your API key"):
             st.markdown("""
-1. Go to **https://console.anthropic.com** and create a free account
-2. Navigate to **API Keys** and create a new key
-3. In Streamlit Cloud, open your app → **Settings → Secrets**
-4. Add this line:
+1. Go to **https://aistudio.google.com/app/apikey** and create a free key
+2. In Streamlit Cloud, open your app → **⋮ (3 dots)** → **Settings → Secrets**
+3. Add this line:
 ```
-ANTHROPIC_API_KEY = "sk-ant-..."
+GEMINI_API_KEY = "AIza..."
 ```
-5. Click **Save** — the app will restart automatically
+4. Click **Save** — the app will restart automatically
 """)
 
     # ── SECTION 1: Natural Language Query ──────────────────────
