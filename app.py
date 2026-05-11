@@ -7,6 +7,8 @@ Author: Yuri Paim | May 2026
 import streamlit as st
 import pandas as pd
 import psycopg2
+import base64
+import os
 from datetime import datetime
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -20,16 +22,55 @@ st.set_page_config(
 # ── Custom CSS ─────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-    .main { background-color: #F8F9FB; }
-    .stMetric { background: white; border-radius: 10px; padding: 15px; border-left: 4px solid #2E6DB4; }
+    /* Main area */
+    .main { background-color: #F0F2F6; }
+    h1 { color: #1B3A6B; }
+    h2 { color: #2E6DB4; }
     .critical { color: #C0392B; font-weight: bold; }
     .ok       { color: #1A7A4A; font-weight: bold; }
     .warning  { color: #D05A1E; font-weight: bold; }
-    h1 { color: #1B3A6B; }
-    h2 { color: #2E6DB4; }
-    .stSidebar { background-color: #1B3A6B; }
+
+    /* Sidebar — dark navy with WHITE text */
+    [data-testid="stSidebar"] {
+        background-color: #0D1B2A !important;
+    }
+    [data-testid="stSidebar"] * {
+        color: #FFFFFF !important;
+    }
+    [data-testid="stSidebar"] .stRadio label {
+        color: #FFFFFF !important;
+        font-size: 15px;
+    }
+    [data-testid="stSidebar"] hr {
+        border-color: #C9A84C !important;
+    }
+    [data-testid="stSidebar"] h2 {
+        color: #C9A84C !important;
+    }
+    /* Gold accent on selected nav item */
+    [data-testid="stSidebar"] [data-baseweb="radio"] input:checked + div {
+        background-color: #C9A84C !important;
+        border-radius: 6px;
+    }
+    /* Metric cards */
+    [data-testid="metric-container"] {
+        background: white;
+        border-radius: 10px;
+        padding: 15px;
+        border-left: 4px solid #C9A84C;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    }
 </style>
 """, unsafe_allow_html=True)
+
+# ── Logo helper ────────────────────────────────────────────────────────────────
+def get_logo_html():
+    logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
+    if os.path.exists(logo_path):
+        with open(logo_path, "rb") as f:
+            data = base64.b64encode(f.read()).decode()
+        return f'<img src="data:image/png;base64,{data}" style="width:100%;max-width:180px;margin:0 auto 8px;display:block;" />'
+    return ""
 
 # ── Database connection ────────────────────────────────────────────────────────
 DB = {
@@ -59,6 +100,9 @@ def scalar(sql, params=None, default=0):
 
 # ── Sidebar navigation ─────────────────────────────────────────────────────────
 with st.sidebar:
+    logo_html = get_logo_html()
+    if logo_html:
+        st.markdown(logo_html, unsafe_allow_html=True)
     st.markdown("## 🏭 NextERA ERP")
     st.markdown("---")
     page = st.radio(
