@@ -10,6 +10,11 @@ import psycopg2
 import base64
 import os
 from datetime import datetime
+try:
+    import anthropic as _anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -128,6 +133,79 @@ def execute(sql, params=None):
             pass
         return False
 
+# ── AI Layer ──────────────────────────────────────────────────────────────────
+DB_SCHEMA = """
+PostgreSQL database — ELEVNOVA ERP (specialty chemicals, Portugal).
+Tables:
+- items(id, code, name, uom, dg_class, un_number, packing_group, min_stock, max_stock, unit_price)
+- inventory(id, item_id, warehouse_id, quantity, last_updated)
+- warehouses(id, name, type, location)
+- stock_movements(id, item_id, warehouse_id, movement_type[IN/OUT/ADJ], quantity, reference, movement_date)
+- suppliers(id, name, country, rating, payment_terms, contact_email)
+- purchase_orders(id, supplier_id, status[DRAFT/CONFIRMED/RECEIVED], order_date, expected_date, total_value, notes)
+- po_lines(id, po_id, item_id, quantity, unit_price, received_qty)
+- hse_incidents(id, incident_date, incident_type, severity[BAIXO/MÉDIO/ALTO/MUITO ALTO], reporter, warehouse_id, description, corrective_action, status[OPEN/INVESTIGATING/CLOSED])
+- risk_assessments(id, area, hazard, likelihood, severity_score, risk_score, control_measures, next_review)
+- permits(id, permit_number, permit_type, area, requestor, approver, status[PENDING/ACTIVE/CLOSED], risk_level, start_date, isolation_required, description, notes)
+"""
+
+@st.cache_resource
+def get_ai():
+    if not ANTHROPIC_AVAILABLE:
+        return None
+    key = ""
+    try:
+        key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    except Exception:
+        pass
+    if not key:
+        key = os.environ.get("ANTHROPIC_API_KEY", "")
+    return _anthropic.Anthropic(api_key=key) if key else None
+
+def ai_call(system, user_msg, max_tokens=600):
+    """Generic Claude call — returns text or None."""
+    ai = get_ai()
+    if not ai:
+        return None
+    try:
+        msg = ai.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user_msg}]
+        )
+        return msg.content[0].text.strip()
+    except Exception as e:
+        st.error(f"AI error: {e}")
+        return None
+
+def nl_to_sql(question):
+    """Convert natural language to safe read-only SQL. Returns (sql, error)."""
+    system = f"""You are a PostgreSQL expert for ELEVNOVA ERP.
+Convert the user's question into a safe read-only SELECT query.
+{DB_SCHEMA}
+Rules:
+- Return ONLY the raw SQL query — no markdown, no backticks, no explanation
+- Only SELECT statements (never INSERT/UPDATE/DELETE)
+- Always add LIMIT 100
+- Use JOINs when needed for readable output
+- If unclear, make a reasonable best-guess query"""
+    sql = ai_call(system, question, max_tokens=400)
+    if not sql:
+        return None, "AI not configured or unavailable."
+    sql = sql.strip().strip("`").strip()
+    if not sql.upper().lstrip().startswith("SELECT"):
+        return None, "AI returned an unsafe query. Try rephrasing."
+    return sql, None
+
+def ai_dashboard_insights(summary):
+    """Return 4 bullet-point operational insights from current data."""
+    system = """You are ELEVNOVA ERP's AI Operations Analyst for QuimTejo Lda, a specialty chemicals company in Portugal.
+Analyse the operational data and return exactly 4 short, specific, actionable insights.
+Format: one insight per line, start each with a relevant emoji (🔴 🟠 🟡 🟢 📦 ⚠️ etc).
+Be specific with numbers. Focus on risks, urgent items, and opportunities. Max 2 sentences each. No intro or outro text."""
+    return ai_call(system, f"Current operational data:\n{summary}", max_tokens=350)
+
 # ── Sidebar navigation ─────────────────────────────────────────────────────────
 with st.sidebar:
     logo_html = get_logo_html()
@@ -137,7 +215,7 @@ with st.sidebar:
     st.markdown("---")
     page = st.radio(
         "Navigate",
-        ["🏠 Dashboard", "📦 Inventory", "🔴 HSE", "🔑 Control of Work", "🚚 Procurement"],
+        ["🏠 Dashboard", "📦 Inventory", "🔴 HSE", "🔑 Control of Work", "🚚 Procurement", "🤖 AI Assistant"],
         label_visibility="collapsed"
     )
     st.markdown("---")
@@ -174,6 +252,66 @@ if page == "🏠 Dashboard":
     col3.metric("⚠️ Open Incidents", int(open_incidents), delta="Needs action" if open_incidents > 0 else "All clear", delta_color="inverse" if open_incidents > 0 else "normal")
     col4.metric("🔑 Active Permits", int(active_permits))
     col5.metric("⏳ Pending Approval", int(pending_permits), delta="Waiting" if pending_permits > 0 else "None", delta_color="inverse" if pending_permits > 0 else "normal")
+
+    # ── AI Insights panel ──────────────────────────────────────
+    st.markdown("---")
+    ai_col, _ = st.columns([3, 1])
+    with ai_col:
+        st.subheader("🤖 ELEVNOVA AI — Operational Insights")
+    with _:
+        run_ai = st.button("✨ Generate Insights", use_container_width=True)
+
+    if run_ai or st.session_state.get("ai_insights_cache"):
+        if run_ai:
+            # Gather live data summary
+            inv_summary = query("""
+                SELECT i.name, inv.quantity, i.min_stock, i.uom
+                FROM inventory inv JOIN items i ON inv.item_id=i.id
+                ORDER BY inv.quantity/NULLIF(i.min_stock,0) ASC LIMIT 10
+            """).to_string(index=False)
+            inc_summary = query("""
+                SELECT incident_type, severity, status, incident_date::text
+                FROM hse_incidents ORDER BY incident_date DESC LIMIT 5
+            """).to_string(index=False)
+            permit_summary = query("""
+                SELECT permit_type, area, status, risk_level, isolation_required
+                FROM permits WHERE status IN ('ACTIVE','PENDING')
+            """).to_string(index=False)
+            po_summary = query("""
+                SELECT s.name as supplier, po.status, po.expected_date::text, pol.quantity, i.name as material
+                FROM purchase_orders po JOIN suppliers s ON po.supplier_id=s.id
+                JOIN po_lines pol ON pol.po_id=po.id JOIN items i ON pol.item_id=i.id
+                WHERE po.status IN ('DRAFT','CONFIRMED')
+            """).to_string(index=False)
+
+            data_summary = f"""
+INVENTORY (lowest stock levels):
+{inv_summary}
+
+RECENT HSE INCIDENTS:
+{inc_summary}
+
+ACTIVE/PENDING PERMITS:
+{permit_summary}
+
+OPEN PURCHASE ORDERS:
+{po_summary}
+"""
+            with st.spinner("Analysing your operations..."):
+                insights = ai_dashboard_insights(data_summary)
+            if insights:
+                st.session_state["ai_insights_cache"] = insights
+        else:
+            insights = st.session_state.get("ai_insights_cache", "")
+
+        if insights:
+            for line in insights.strip().split("\n"):
+                if line.strip():
+                    st.info(line.strip())
+        elif get_ai() is None:
+            st.warning("⚠️ AI not configured. Add your ANTHROPIC_API_KEY to Streamlit secrets to enable AI insights.")
+    else:
+        st.caption("Click **✨ Generate Insights** to get AI-powered analysis of your current operations.")
 
     st.markdown("---")
     col_left, col_right = st.columns(2)
@@ -702,6 +840,178 @@ elif page == "🚚 Procurement":
         st.dataframe(df_sup, use_container_width=True, hide_index=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PAGE: AI ASSISTANT
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "🤖 AI Assistant":
+    st.title("🤖 ELEVNOVA AI Assistant")
+    st.markdown("Ask questions in plain language, get stock predictions, and let AI surface hidden risks.")
+    st.markdown("---")
+
+    if get_ai() is None:
+        st.error("⚠️ AI not configured. Add `ANTHROPIC_API_KEY` to your Streamlit secrets (see setup instructions below).")
+        with st.expander("📋 How to add your API key"):
+            st.markdown("""
+1. Go to **https://console.anthropic.com** and create a free account
+2. Navigate to **API Keys** and create a new key
+3. In Streamlit Cloud, open your app → **Settings → Secrets**
+4. Add this line:
+```
+ANTHROPIC_API_KEY = "sk-ant-..."
+```
+5. Click **Save** — the app will restart automatically
+""")
+
+    # ── SECTION 1: Natural Language Query ──────────────────────
+    st.subheader("💬 Ask Anything About Your Operations")
+    st.caption("Type a question in English or Portuguese — AI converts it to SQL and runs it live.")
+
+    example_questions = [
+        "Which materials are below minimum stock level?",
+        "Show all open HSE incidents with high severity",
+        "How many permits are pending approval?",
+        "What is the total value of confirmed purchase orders?",
+        "Show stock movements in the last 7 days",
+        "Which supplier has the highest rating?"
+    ]
+    with st.expander("💡 Example questions"):
+        for q in example_questions:
+            st.markdown(f"• {q}")
+
+    question = st.text_input("Your question:", placeholder='e.g. "Which materials will run out soon?"',
+                              label_visibility="collapsed")
+    ask_col, _ = st.columns([1, 4])
+    with ask_col:
+        ask_btn = st.button("🔍 Ask AI", use_container_width=True)
+
+    if ask_btn and question.strip():
+        with st.spinner("Converting to SQL and querying database..."):
+            sql, err = nl_to_sql(question.strip())
+        if err:
+            st.error(err)
+        else:
+            with st.expander("🔎 Generated SQL", expanded=False):
+                st.code(sql, language="sql")
+            df_result = query(sql)
+            if df_result.empty:
+                st.info("No results found for that query.")
+            else:
+                st.success(f"✅ {len(df_result)} row(s) returned")
+                st.dataframe(df_result, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
+    # ── SECTION 2: Stock Prediction ─────────────────────────────
+    st.subheader("📊 AI Stock Predictions — Days to Stockout")
+    st.caption("Based on actual consumption from the last 30 days.")
+
+    if st.button("🔮 Run Stock Prediction", use_container_width=False):
+        pred_df = query("""
+            WITH daily_usage AS (
+                SELECT item_id, warehouse_id,
+                       SUM(quantity) / GREATEST(COUNT(DISTINCT DATE(movement_date)), 1) AS daily_rate
+                FROM stock_movements
+                WHERE movement_type = 'OUT'
+                  AND movement_date >= NOW() - INTERVAL '30 days'
+                GROUP BY item_id, warehouse_id
+            )
+            SELECT
+                i.code        AS "Code",
+                i.name        AS "Material",
+                i.uom         AS "Unit",
+                inv.quantity  AS "Current Stock",
+                i.min_stock   AS "Min Stock",
+                ROUND(d.daily_rate::numeric, 2) AS "Daily Usage (avg)",
+                CASE
+                    WHEN d.daily_rate > 0
+                    THEN FLOOR(inv.quantity / d.daily_rate)::int
+                    ELSE NULL
+                END AS "Days to Stockout",
+                CASE
+                    WHEN d.daily_rate > 0 AND FLOOR(inv.quantity / d.daily_rate) <= 7
+                        THEN '🔴 CRITICAL — order NOW'
+                    WHEN d.daily_rate > 0 AND FLOOR(inv.quantity / d.daily_rate) <= 14
+                        THEN '🟠 LOW — order soon'
+                    WHEN d.daily_rate > 0 AND FLOOR(inv.quantity / d.daily_rate) <= 30
+                        THEN '🟡 MONITOR'
+                    WHEN d.daily_rate > 0
+                        THEN '🟢 OK'
+                    ELSE '— No recent usage'
+                END AS "AI Alert"
+            FROM inventory inv
+            JOIN items i ON inv.item_id = i.id
+            LEFT JOIN daily_usage d ON d.item_id = inv.item_id AND d.warehouse_id = inv.warehouse_id
+            ORDER BY
+                CASE WHEN d.daily_rate > 0 THEN inv.quantity / d.daily_rate ELSE 999 END ASC
+        """)
+        if pred_df.empty:
+            st.info("No stock movement data found for the last 30 days. Record some movements first.")
+        else:
+            st.dataframe(pred_df, use_container_width=True, hide_index=True, height=350)
+            critical = pred_df[pred_df["AI Alert"].str.startswith("🔴", na=False)]
+            if not critical.empty:
+                st.error(f"🔴 {len(critical)} material(s) need immediate reorder!")
+                # Ask AI to explain
+                if get_ai():
+                    with st.spinner("Generating AI reorder recommendations..."):
+                        rec = ai_call(
+                            "You are a supply chain expert. Give concise reorder recommendations.",
+                            f"Critical stock items:\n{critical.to_string(index=False)}\n\nGive 1-2 sentence action for each item.",
+                            max_tokens=300
+                        )
+                    if rec:
+                        st.warning(f"**AI Recommendations:**\n\n{rec}")
+
+    st.markdown("---")
+
+    # ── SECTION 3: HSE Risk Analyser ────────────────────────────
+    st.subheader("⚠️ AI HSE Risk Analyser")
+    st.caption("AI reviews your active permits and open incidents and flags conflicts or escalating risks.")
+
+    if st.button("🔍 Analyse Current HSE Risk", use_container_width=False):
+        permits_data = query("""
+            SELECT permit_type, area, status, risk_level, isolation_required, description
+            FROM permits WHERE status IN ('ACTIVE','PENDING')
+        """)
+        incidents_data = query("""
+            SELECT incident_type, severity, status, description, incident_date::text
+            FROM hse_incidents WHERE status IN ('OPEN','INVESTIGATING')
+            ORDER BY incident_date DESC LIMIT 10
+        """)
+        risks_data = query("""
+            SELECT area, hazard, risk_score, control_measures
+            FROM risk_assessments WHERE risk_score >= 10
+            ORDER BY risk_score DESC
+        """)
+
+        if permits_data.empty and incidents_data.empty:
+            st.info("No active permits or open incidents to analyse.")
+        else:
+            combined = f"""
+ACTIVE/PENDING PERMITS:
+{permits_data.to_string(index=False) if not permits_data.empty else 'None'}
+
+OPEN/INVESTIGATING INCIDENTS:
+{incidents_data.to_string(index=False) if not incidents_data.empty else 'None'}
+
+HIGH RISK AREAS (score ≥10):
+{risks_data.to_string(index=False) if not risks_data.empty else 'None'}
+"""
+            with st.spinner("Analysing HSE risk..."):
+                analysis = ai_call(
+                    """You are an HSE risk expert for a Portuguese specialty chemicals company.
+Analyse the permits, incidents, and risk areas provided.
+Identify: conflicts between simultaneous permits, escalating incident patterns, areas needing immediate attention.
+Return 3-5 specific risk observations as bullet points with emojis. Be direct and specific.""",
+                    combined, max_tokens=400
+                )
+            if analysis:
+                for line in analysis.strip().split("\n"):
+                    if line.strip():
+                        st.warning(line.strip())
+            else:
+                st.info("AI not available — configure your API key to enable this feature.")
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Footer
 st.markdown("---")
-st.caption("⚡ ELEVNOVA ERP v0.2 — Elevate to the Next Standard | © 2026 Bravery & Perfection Lda | Powered by AWS RDS eu-north-1")
+st.caption("⚡ ELEVNOVA ERP v0.3 — Elevate to the Next Standard | © 2026 Bravery & Perfection Lda | Powered by AWS RDS eu-north-1 + Claude AI")
