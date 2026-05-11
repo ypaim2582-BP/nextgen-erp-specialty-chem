@@ -1,5 +1,5 @@
 """
-NextERA ERP — Web Dashboard
+ELEVNOVA ERP — Web Dashboard
 Built with Streamlit | Connects to AWS PostgreSQL (RDS)
 Author: Yuri Paim | May 2026
 """
@@ -13,8 +13,8 @@ from datetime import datetime
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="NextERA ERP",
-    page_icon="🏭",
+    page_title="ELEVNOVA ERP — Elevate to the Next Standard",
+    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -117,7 +117,7 @@ with st.sidebar:
     logo_html = get_logo_html()
     if logo_html:
         st.markdown(logo_html, unsafe_allow_html=True)
-    st.markdown("## 🏭 NextERA ERP")
+    st.markdown("## ⚡ ELEVNOVA ERP")
     st.markdown("---")
     page = st.radio(
         "Navigate",
@@ -391,7 +391,7 @@ elif page == "🔑 Control of Work":
         st.error(f"🔒 {int(loto_p)} active/pending permit(s) require energy isolation (LOTO). Verify before authorising.")
 
     st.markdown("---")
-    st.info("💡 **NextERA Advantage:** This permit register is live-linked to your inventory and HSE modules. Any incident during an active permit is automatically associated. Conflict detection between overlapping permits — coming in next version.")
+    st.info("💡 **ELEVNOVA Advantage:** This permit register is live-linked to your inventory and HSE modules. Any incident during an active permit is automatically associated. Conflict detection between overlapping permits — coming in next version.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE: PROCUREMENT
@@ -444,4 +444,4 @@ elif page == "🚚 Procurement":
 # ─────────────────────────────────────────────────────────────────────────────
 # Footer
 st.markdown("---")
-st.caption("NextERA ERP v0.1 — Foundation Build | © 2026 Yuri Paim | Database: AWS RDS eu-north-1")
+st.caption("⚡ ELEVNOVA ERP v0.1 — Elevate to the Next Standard | © 2026 Bravery & Perfection Lda | Powered by AWS RDS eu-north-1")
